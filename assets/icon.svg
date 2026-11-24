@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" fill="none">
+  <defs>
+    <linearGradient id="tileBg" x1="64" y1="8" x2="64" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#18191C"/>
+      <stop offset="100%" stop-color="#0F1012"/>
+    </linearGradient>
+    <linearGradient id="barGlow" x1="64" y1="24" x2="64" y2="104" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#3FE08D"/>
+      <stop offset="100%" stop-color="#2BD47D"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="28" fill="url(#tileBg)" stroke="#FFFFFF" stroke-opacity="0.14" stroke-width="1.5"/>
+  <!-- 5-bar studio waveform mark matching ClearMic Studio.app icon -->
+  <rect x="27" y="50" width="10" height="28" rx="5" fill="url(#barGlow)" opacity="0.65"/>
+  <rect x="43" y="36" width="10" height="56" rx="5" fill="url(#barGlow)" opacity="0.88"/>
+  <rect x="59" y="24" width="10" height="80" rx="5" fill="url(#barGlow)"/>
+  <rect x="75" y="40" width="10" height="48" rx="5" fill="url(#barGlow)" opacity="0.88"/>
+  <rect x="91" y="52" width="10" height="24" rx="5" fill="url(#barGlow)" opacity="0.65"/>
+</svg>

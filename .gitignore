@@ -1,0 +1,34 @@
+# macOS & build artifacts
+.DS_Store
+ClearMic Studio.app/
+*.driver/
+*.dylib
+*.mlpackage/
+*.mlmodelc/
+*.safetensors
+*.icns
+build/
+dist/
+
+# Python environments & caches
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Audio recordings, personal voice prints, and model checkpoints
+*.wav
+*.m4a
+*.mp3
+*.flac
+checkpoints/
+mlx_cache/
+coreml_cache/
+real_test/
+demo_outputs/
+
+# Editor / local tool state
+.vscode/
+.claude/
+*.sock
