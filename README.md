@@ -21,10 +21,10 @@ Instead of relying on cloud APIs or heavy PyTorch pipelines, ClearMic Studio run
 
 ## Highlights
 
-- **Locks onto *your* voice:** Enrolls a 5-second voice print directly from your microphone and suppresses other people speaking in the same room via **STFT-fused multi-pass VoxLock** (1, 2, or 3 passes at a constant **24 ms** algorithmic delay).
+- **Locks onto *your* voice:** Enrolls a 5-second voice print directly from your microphone — or by dragging & dropping an `.m4a`/`.wav` Voice Memo — and suppresses other people speaking in the same room via **STFT-fused multi-pass VoxLock** (1, 2, or 3 passes at a constant **24 ms** algorithmic delay).
 - **Handles irregular real-world noise:** Runs **Inworld Realtime 48 kHz** denoising ahead of target-speaker extraction, removing clattering dishes, typing, street traffic, café chatter, and room reverb (`23.9 dB` irregular noise reduction, `0.993` clean-voice fidelity under `-2.5 dB` SNR stress tests).
 - **Real 48 kHz voice highs, 0 ms extra delay:** Preserves your microphone's real `7.2–24 kHz` vocal air using a native C++ `vDSP_biquad` crossover gated causally by your target-to-total vocal envelope ratio — paired with a zero-latency **Broadcast Studio EQ** (warmth, boxy-mud cut, presence, air) and soft-knee leveler.
-- **Bundled Virtual Microphone (`ClearMic.driver`):** No BlackHole, no Homebrew, no Terminal setup. Click **Install virtual mic** inside the app to install the signed CoreAudio HAL driver once; macOS never hijacks your speakers (`DeviceCanBeDefaultDevice = 0` on output).
+- **Guided Setup & Bundled Virtual Mic (`ClearMic.driver`):** No BlackHole, no Homebrew, no Terminal setup. On first launch, ClearMic Studio's native macOS setup assistant walks through Microphone permission, one-click Touch ID installation (and uninstall) of the signed CoreAudio HAL driver, and voice-print enrollment. macOS never hijacks your speakers (`DeviceCanBeDefaultDevice = 0` on output).
 - **Built-in 5-second Sound Check:** Record 5 seconds of your live processed voice and hear it played straight back before joining a call.
 
 ---
@@ -99,15 +99,17 @@ uv pip install -e .
 
 ### 2. Build & launch the macOS app
 ```bash
-make run
+make run          # build, sign, and launch ClearMic Studio.app
+make dmg          # optional: build signed drag-to-Applications dist/ClearMic-Studio.dmg
 ```
 
 `make run` compiles `engine/libnative_dsp.dylib`, `engine/libcoreml_ane.dylib`, the bundled CoreAudio virtual mic (`ClearMic.driver`), and `ClearMic Studio.app`, auto-signing with your **Developer ID Application** certificate if present in Keychain (or ad-hoc signing otherwise).
 
 ### 3. First-time setup inside ClearMic Studio
-1. Click **Install virtual mic** — macOS prompts once for your Touch ID / admin password, installs `ClearMic.driver` into `/Library/Audio/Plug-Ins/HAL/`, and reloads `coreaudiod`.
-2. Click **Record voice print** and speak naturally alone for 5 seconds (saved to `~/Library/Application Support/ClearMic Studio/voice_print_16k.wav`).
-3. Click **Start live mic**, test yourself with **Run sound check**, and choose **`ClearMic Virtual Mic`** as your microphone in Zoom, Google Meet, or Discord.
+1. **Allow microphone** — click **Allow microphone** in the Setup sheet (or open System Settings → Privacy & Security → Microphone directly from the app).
+2. **Install virtual mic** — click **Install virtual mic**; macOS prompts once for your Touch ID / admin password, installs `ClearMic.driver` into `/Library/Audio/Plug-Ins/HAL/`, and reloads `coreaudiod`. (You can also uninstall it anytime from **Setup**.)
+3. **Target voice print** — click **Record 5s** and speak naturally alone, or drag & drop an existing `.m4a` / `.wav` Voice Memo onto the card (saved to `~/Library/Application Support/ClearMic Studio/voice_print_16k.wav`).
+4. Click **Start live mic**, test yourself with **Run sound check**, and choose **`ClearMic Virtual Mic`** as your microphone in Zoom, Google Meet, or Discord.
 
 ---
 
@@ -127,9 +129,10 @@ clearmic-studio/
 │   └── coreml_ane.mm       # GIL-free Objective-C++ CoreML Apple Neural Engine wrapper
 └── macos_app/
     ├── build_app.sh        # Builds, bundles ClearMic.driver, generates .icns, Developer ID signs
+    ├── build_dmg.sh        # Builds signed drag-to-Applications dist/ClearMic-Studio.dmg
     ├── entitlements.plist  # Hardened Runtime + Microphone + AppleEvents entitlements
     ├── Driver/             # Native C CoreAudio HAL AudioServerPlugIn ("ClearMic Virtual Mic")
-    └── Sources/            # Native SwiftUI + CoreAudio macOS application
+    └── Sources/            # Native SwiftUI + CoreAudio macOS application (incl. SetupSheet)
 ```
 
 ---

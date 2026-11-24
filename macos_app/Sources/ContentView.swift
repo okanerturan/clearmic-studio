@@ -66,6 +66,8 @@ struct ContentView: View {
     @State private var engineReady: Bool = false
     @State private var hasSocket: Bool = false
     @State private var errorText: String? = nil
+    @State private var showSetupSheet: Bool = false
+    @State private var checkedFirstLaunchSetup: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -89,7 +91,8 @@ struct ContentView: View {
                 daemon: daemon,
                 bridge: bridge,
                 hasInput: selectedInputID != 0,
-                onRecord: startEnroll
+                onRecord: startEnroll,
+                onDropFile: handleDroppedVoiceFile
             )
         }
         .padding(.horizontal, Space.s5)
@@ -100,10 +103,30 @@ struct ContentView: View {
         .foregroundStyle(Palette.ink)
         .tint(Palette.accent)
         .preferredColorScheme(.dark)
+        .sheet(isPresented: $showSetupSheet) {
+            SetupSheet(
+                devices: devices,
+                installer: installer,
+                daemon: daemon,
+                bridge: bridge,
+                hasInput: selectedInputID != 0,
+                onRecordVoicePrint: startEnroll,
+                onDropVoiceFile: handleDroppedVoiceFile,
+                onFinish: { showSetupSheet = false }
+            )
+        }
         .onAppear {
             installer.refreshMicStatus()
             selectDefaultDevices()
             daemon.start()
+            if !checkedFirstLaunchSetup {
+                checkedFirstLaunchSetup = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    if installer.micAuthStatus != .authorized || !devices.hasVirtualMic {
+                        showSetupSheet = true
+                    }
+                }
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             installer.refreshMicStatus()
@@ -137,6 +160,14 @@ struct ContentView: View {
             )
 
             Spacer(minLength: Space.s4)
+
+            if !isRunning {
+                Button(action: { showSetupSheet = true }) {
+                    Label("Setup", systemImage: "checkmark.shield")
+                }
+                .buttonStyle(LinkButtonStyle())
+                .help("Check microphone permissions, virtual mic driver and voice print.")
+            }
 
             if isRunning {
                 Toggle(isOn: $bypass) {
@@ -448,6 +479,14 @@ struct ContentView: View {
             }
         }
     }
+
+    private func handleDroppedVoiceFile(_ url: URL) {
+        installer.convertDroppedAudioToWav48k(from: url) { wavPath in
+            if let p = wavPath {
+                daemon.enroll(wavPath: p)
+            }
+        }
+    }
 }
 
 // MARK: - Status
@@ -577,18 +616,23 @@ struct VoicePrintSection: View {
     @ObservedObject var bridge: CoreAudioBridge
     let hasInput: Bool
     let onRecord: () -> Void
+    let onDropFile: (URL) -> Void
+
+    @State private var isDropTargeted = false
 
     /// The engine names the voice print by its file; the two files it ships with get plain names.
     private var printName: String {
         guard daemon.hasEnrollment else { return "No voice print yet" }
         switch daemon.enrollLabel {
         case "00_clean_enroll_16k.wav", "Default Voice Print": return "Default voice print"
-        case "user_enroll_16k.wav": return "Your saved voice print"
+        case "user_enroll_16k.wav", "voice_print_16k.wav": return "Your saved voice print"
         default: return daemon.enrollLabel
         }
     }
 
     var body: some View {
+        let dropShape = RoundedRectangle(cornerRadius: Radius.tile, style: .continuous)
+
         VStack(alignment: .leading, spacing: Space.s2) {
             SectionLabel("Voice print")
 
@@ -601,9 +645,9 @@ struct VoicePrintSection: View {
                             .accessibilityHidden(true)
                         Text(printName).font(Typo.strong)
                     }
-                    Text("Speak alone for 5 seconds to lock onto your voice.")
+                    Text(isDropTargeted ? "Drop audio file to enroll your voice." : "Speak alone for 5 seconds, or drop an .m4a / .wav Voice Memo here.")
                         .font(Typo.caption)
-                        .foregroundStyle(Palette.muted)
+                        .foregroundStyle(isDropTargeted ? Palette.accent : Palette.muted)
                 }
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -630,6 +674,12 @@ struct VoicePrintSection: View {
                         .disabled(!bridge.isRunning)
                         .help("While live, records 5 seconds of the cleaned output and plays it back.")
                 }
+            }
+            .padding(isDropTargeted ? Space.s2 : 0)
+            .background(isDropTargeted ? dropShape.fill(Palette.accent.opacity(0.08)) : dropShape.fill(Color.clear))
+            .overlay(isDropTargeted ? dropShape.strokeBorder(Palette.accent, lineWidth: 1.5) : dropShape.strokeBorder(Color.clear, lineWidth: 1))
+            .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+                handleAudioDrop(providers: providers, onFile: onDropFile)
             }
         }
     }

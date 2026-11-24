@@ -2,9 +2,10 @@ import AppKit
 import AVFoundation
 import Foundation
 
-/// Installs the bundled, Developer-ID-signed ClearMic.driver into /Library/Audio/Plug-Ins/HAL/
-/// via macOS's native Touch ID / Admin Password sheet — no Terminal, no Homebrew, no reboot.
-/// Also provides direct links to macOS Sound & Microphone System Settings panes.
+/// Installs/uninstalls the bundled, Developer-ID-signed ClearMic.driver into
+/// /Library/Audio/Plug-Ins/HAL/ via macOS's native Touch ID / Admin Password sheet,
+/// converts dropped Voice Memos (.m4a/.wav/.mp3/.flac) via macOS afconvert, and
+/// opens System Settings panes directly.
 final class DriverInstaller: ObservableObject {
     @Published var isInstalling: Bool = false
     @Published var installError: String? = nil
@@ -48,20 +49,57 @@ final class DriverInstaller: ObservableObject {
             completion(false)
             return
         }
+        let escapedSrc = src.replacingOccurrences(of: "'", with: "'\\''")
+        let shellCmd = """
+        mkdir -p '\(halDir)' && \
+        rm -rf '\(installedPath)' && \
+        cp -R '\(escapedSrc)' '\(installedPath)' && \
+        chown -R root:wheel '\(installedPath)' && \
+        chmod -R a+rX '\(installedPath)' && \
+        killall -9 coreaudiod || true
+        """
+        runAdminScript(shellCmd, waitSeconds: 1.5, completion: completion)
+    }
+
+    func uninstallDriver(completion: @escaping (Bool) -> Void) {
+        let shellCmd = """
+        rm -rf '\(installedPath)' && \
+        killall -9 coreaudiod || true
+        """
+        runAdminScript(shellCmd, waitSeconds: 1.2, completion: completion)
+    }
+
+    /// Converts any macOS-readable audio file (.m4a Voice Memo, .wav, .mp3, .aiff, .caf)
+    /// into a clean 48 kHz mono float32 WAV for Voice Print enrollment.
+    func convertDroppedAudioToWav48k(from url: URL, completion: @escaping (String?) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let outPath = "/tmp/clearmic_dropped_enroll.wav"
+            try? FileManager.default.removeItem(atPath: outPath)
+
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/afconvert")
+            proc.arguments = ["-f", "WAVE", "-d", "LEF32@48000", "-c", "1", url.path, outPath]
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                let ok = (proc.terminationStatus == 0) && FileManager.default.fileExists(atPath: outPath)
+                DispatchQueue.main.async {
+                    completion(ok ? outPath : nil)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.installError = "Could not decode audio file: \(error.localizedDescription)"
+                    completion(nil)
+                }
+            }
+        }
+    }
+
+    private func runAdminScript(_ shellCmd: String, waitSeconds: Double, completion: @escaping (Bool) -> Void) {
         isInstalling = true
         installError = nil
-
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            let escapedSrc = src.replacingOccurrences(of: "'", with: "'\\''")
-            let shellCmd = """
-            mkdir -p '\(self.halDir)' && \
-            rm -rf '\(self.installedPath)' && \
-            cp -R '\(escapedSrc)' '\(self.installedPath)' && \
-            chown -R root:wheel '\(self.installedPath)' && \
-            chmod -R a+rX '\(self.installedPath)' && \
-            killall -9 coreaudiod || true
-            """
             let escapedForAS = shellCmd
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\"", with: "\\\"")
@@ -71,9 +109,8 @@ final class DriverInstaller: ObservableObject {
             let script = NSAppleScript(source: scriptSrc)
             let result = script?.executeAndReturnError(&errDict)
 
-            // Wait briefly for coreaudiod to respawn and register ClearMic Virtual Mic
             if result != nil {
-                Thread.sleep(forTimeInterval: 1.4)
+                Thread.sleep(forTimeInterval: waitSeconds)
             }
 
             DispatchQueue.main.async {
@@ -82,8 +119,7 @@ final class DriverInstaller: ObservableObject {
                     self.installError = nil
                     completion(true)
                 } else {
-                    let msg = (errDict?[NSAppleScript.errorMessage] as? String) ?? "Installation cancelled."
-                    // User cancelling the password sheet isn't an error worth shouting about
+                    let msg = (errDict?[NSAppleScript.errorMessage] as? String) ?? "Action cancelled."
                     if !msg.localizedCaseInsensitiveContains("cancel") && !msg.contains("-128") {
                         self.installError = msg
                     }
