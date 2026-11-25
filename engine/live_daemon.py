@@ -43,6 +43,7 @@ import soxr
 
 import inworld_mlx
 import low_latency_48k as ll
+import speech_gate
 import voxlock_mlx
 
 
@@ -105,6 +106,7 @@ class LiveBroadcastProcessor:
         self.lock = threading.Lock()
         self.preset_id = "studio_call"
         self.studio_eq = True
+        self.speech_gate_enabled = True
         self.bypass = False
         self.gate_gamma = 1.6
         self.output_gain = 1.0
@@ -120,6 +122,12 @@ class LiveBroadcastProcessor:
 
         emit({"event": "loading", "message": "Loading VoxLock Metal INT8 LSTM..."})
         self.voxlock = voxlock_mlx.VoxLockMLX(precision="hybrid")
+
+        emit({"event": "loading", "message": "Loading Silero VAD speech gate..."})
+        try:
+            self.vad_gate = speech_gate.SileroSpeechGate()
+        except Exception:
+            self.vad_gate = None
 
         # Load initial enrollment audio (or fallback silent buffer until user enrolls)
         self.enroll_16k = self._load_enroll(enroll_path)
@@ -249,11 +257,14 @@ class LiveBroadcastProcessor:
         self.out_fifo = np.zeros(0, dtype=np.float32)
         self.in_agc_env = 0.08  # gentle causal input leveler for quiet mics
         self.comp_env = 0.08    # gentle causal broadcast compressor/limiter
+        if self.vad_gate is not None:
+            self.vad_gate.reset()
 
     def configure(
         self,
         preset: str | None = None,
         studio_eq: bool | None = None,
+        speech_gate_enabled: bool | None = None,
         gate_gamma: float | None = None,
         output_gain: float | None = None,
         bypass: bool | None = None,
@@ -266,6 +277,10 @@ class LiveBroadcastProcessor:
             if studio_eq is not None and studio_eq != self.studio_eq:
                 self.studio_eq = studio_eq
                 need_reset = True
+            if speech_gate_enabled is not None:
+                self.speech_gate_enabled = bool(speech_gate_enabled)
+                if self.vad_gate is not None:
+                    self.vad_gate.reset()
             if gate_gamma is not None and abs(gate_gamma - self.gate_gamma) > 1e-3:
                 self.gate_gamma = float(np.clip(gate_gamma, 0.5, 3.0))
                 need_reset = True
@@ -308,6 +323,10 @@ class LiveBroadcastProcessor:
 
             if len(y48):
                 if not self.use_voxlock:
+                    if self.speech_gate_enabled and self.vad_gate is not None:
+                        y16_vad = self.down_rs.resample_chunk(y48, last=False)
+                        if len(y16_vad):
+                            self.vad_gate.feed_16k(y16_vad)
                     out_seg = self.bq_master.process(y48)
                     self.out_fifo = np.concatenate([self.out_fifo, out_seg])
                 else:
@@ -316,6 +335,8 @@ class LiveBroadcastProcessor:
                     if len(y16_in):
                         y16_out = self.vl_stream.push(y16_in)
                         if len(y16_out):
+                            if self.speech_gate_enabled and self.vad_gate is not None:
+                                self.vad_gate.feed_16k(y16_out)
                             y48_t = self.up_rs.resample_chunk(y16_out, last=False)
                             n = len(y48_t)
                             if n > 0:
@@ -352,16 +373,19 @@ class LiveBroadcastProcessor:
             else:
                 y_raw = np.zeros(n_req, dtype=np.float32)
 
-            # Gentle causal broadcast voice leveler + soft-knee limiter (-1 dBFS ceiling)
+            # Gentle causal broadcast voice leveler + Silero VAD speech gate + soft-knee limiter (-1 dBFS ceiling)
             if not np.all(np.isfinite(y_raw)):
                 # Self-heal immediately if any numerical glitch ever enters an IIR/RNN state
                 self._reset_streams()
                 y_out = np.zeros(n_req, dtype=np.float32)
             else:
+                speech_active = (not self.speech_gate_enabled) or (self.vad_gate is None) or self.vad_gate.is_open
                 y_rms = float(np.sqrt(np.mean(y_raw * y_raw) + 1e-12))
-                if y_rms > 0.008 and np.isfinite(y_rms):
+                if speech_active and y_rms > 0.008 and np.isfinite(y_rms):
                     self.comp_env = 0.90 * self.comp_env + 0.10 * y_rms
                 makeup = float(np.clip(0.14 / max(self.comp_env, 0.03), 0.7, 2.2)) * self.output_gain
+                if self.speech_gate_enabled and self.vad_gate is not None:
+                    y_raw = self.vad_gate.apply_48k(y_raw)
                 y_out = np.tanh((y_raw * makeup) / 0.89) * 0.89
                 y_out = y_out.astype(np.float32)
                 if not np.all(np.isfinite(y_out)):
@@ -435,11 +459,18 @@ def main() -> None:
                 proc.configure(
                     preset=msg.get("preset"),
                     studio_eq=msg.get("studio_eq"),
+                    speech_gate_enabled=msg.get("speech_gate"),
                     gate_gamma=msg.get("gate_gamma"),
                     output_gain=msg.get("output_gain"),
                     bypass=msg.get("bypass"),
                 )
-                emit({"event": "configured", "preset": proc.preset_id, "studio_eq": proc.studio_eq, "bypass": proc.bypass})
+                emit({
+                    "event": "configured",
+                    "preset": proc.preset_id,
+                    "studio_eq": proc.studio_eq,
+                    "speech_gate": proc.speech_gate_enabled,
+                    "bypass": proc.bypass,
+                })
             elif cmd == "enroll":
                 wav_p = pathlib.Path(msg["wav_path"])
                 save_p = pathlib.Path(msg.get("save_path", str(default_enroll)))

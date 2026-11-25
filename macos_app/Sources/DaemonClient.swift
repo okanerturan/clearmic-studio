@@ -154,11 +154,12 @@ final class DaemonClient: ObservableObject {
         try? FileManager.default.removeItem(atPath: sockFile)
     }
 
-    func configure(preset: String, studioEQ: Bool, gateGamma: Double, outputGain: Double, bypass: Bool) {
+    func configure(preset: String, studioEQ: Bool, speechGate: Bool, gateGamma: Double, outputGain: Double, bypass: Bool) {
         sendJSON([
             "cmd": "configure",
             "preset": preset,
             "studio_eq": studioEQ,
+            "speech_gate": speechGate,
             "gate_gamma": gateGamma,
             "output_gain": outputGain,
             "bypass": bypass,

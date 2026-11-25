@@ -73,6 +73,7 @@ struct ContentView: View {
     @State private var selectedOutputID: AudioDeviceID = 0
     @State private var preset: String = "studio_call"
     @State private var studioEQ: Bool = true
+    @State private var speechGate: Bool = true
     @State private var bypass: Bool = false
     @State private var gateGamma: Double = 1.6
     @State private var outputGain: Double = 1.0
@@ -392,7 +393,7 @@ struct ContentView: View {
     // MARK: - Tone
 
     private var toneSection: some View {
-        VStack(alignment: .leading, spacing: Space.s2) {
+        VStack(alignment: .leading, spacing: Space.s3) {
             SectionLabel("Tone")
 
             HStack(alignment: .center, spacing: Space.s5) {
@@ -409,6 +410,24 @@ struct ContentView: View {
                 .controlSize(.small)
                 .onChange(of: studioEQ) { pushConfig() }
 
+                Toggle(isOn: $speechGate) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Speech gate").font(Typo.strong)
+                        Text("Mutes mouth sounds, clicks and coughs.")
+                            .font(Typo.caption)
+                            .foregroundStyle(Palette.muted)
+                    }
+                    .fixedSize()
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .help("Uses Silero VAD (0.1 ms) to mute non-speech sounds like lip smacks, clicks, coughs and mic bumps.")
+                .onChange(of: speechGate) { pushConfig() }
+
+                Spacer(minLength: 0)
+            }
+
+            HStack(alignment: .center, spacing: Space.s5) {
                 toneSlider(
                     "Highs gate",
                     value: stepped($gateGamma),
@@ -499,6 +518,7 @@ struct ContentView: View {
         daemon.configure(
             preset: preset,
             studioEQ: studioEQ,
+            speechGate: speechGate,
             gateGamma: gateGamma,
             outputGain: outputGain,
             bypass: bypass
