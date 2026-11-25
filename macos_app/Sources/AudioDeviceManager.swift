@@ -55,6 +55,11 @@ final class AudioDeviceManager: ObservableObject {
                   let uid = getStringProperty(devID, kAudioDevicePropertyDeviceUID) else {
                 continue
             }
+            // Hide macOS internal/private CoreAudio devices (e.g. CADefaultDeviceAggregate-<pid>-0
+            // created behind the scenes by AVAudioEngine) and offline devices.
+            if isHiddenOrPrivateAggregate(devID, name: name, uid: uid) {
+                continue
+            }
             let inCh = channelCount(devID, scope: kAudioDevicePropertyScopeInput)
             let outCh = channelCount(devID, scope: kAudioDevicePropertyScopeOutput)
             let sr = getNominalSampleRate(devID) ?? 48000.0
@@ -140,6 +145,38 @@ final class AudioDeviceManager: ObservableObject {
         )
         AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &addr, DispatchQueue.main, block)
         listenerBlock = nil
+    }
+
+    private func isHiddenOrPrivateAggregate(_ deviceID: AudioDeviceID, name: String, uid: String) -> Bool {
+        if name.hasPrefix("CADefaultDeviceAggregate") || uid.hasPrefix("CADefaultDeviceAggregate")
+            || name.hasPrefix("CADefaultAggregate") || uid.hasPrefix("CADefaultAggregate") {
+            return true
+        }
+        var hiddenAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyIsHidden,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        if AudioObjectHasProperty(deviceID, &hiddenAddr) {
+            var hidden: UInt32 = 0
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            if AudioObjectGetPropertyData(deviceID, &hiddenAddr, 0, nil, &size, &hidden) == noErr, hidden != 0 {
+                return true
+            }
+        }
+        var aliveAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsAlive,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        if AudioObjectHasProperty(deviceID, &aliveAddr) {
+            var alive: UInt32 = 1
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            if AudioObjectGetPropertyData(deviceID, &aliveAddr, 0, nil, &size, &alive) == noErr, alive == 0 {
+                return true
+            }
+        }
+        return false
     }
 
     private func getStringProperty(_ deviceID: AudioDeviceID, _ selector: AudioObjectPropertySelector) -> String? {
