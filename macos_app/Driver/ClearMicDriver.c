@@ -49,10 +49,12 @@ static UInt64                   gNumberTimeStamps = 0;
 static UInt64                   gAnchorHostTime = 0;
 static Float64                  gAnchorSampleTime = 0.0;
 
-// Lock-protected loopback ring buffer indexed by sample time (modulo kRingFrames)
+// Lock-protected FIFO loopback ring buffer (immune to client buffer-size / sample-time offsets)
 static os_unfair_lock           gRingLock = OS_UNFAIR_LOCK_INIT;
 static float                    gRingBuf[kRingFrames * kNumChannels];
-static int64_t                  gLastWriteEnd = -1;
+static UInt32                   gRingRead = 0;
+static UInt32                   gRingWrite = 0;
+static UInt32                   gRingCount = 0;
 
 // Forward declarations
 static HRESULT  CM_QueryInterface(void* inDriver, REFIID inUUID, LPVOID* outInterface);
@@ -165,7 +167,10 @@ static OSStatus CM_Initialize(AudioServerPlugInDriverRef inDriver, AudioServerPl
     Float64 hostClockFreq = (Float64)tb.denom / (Float64)tb.numer * 1000000000.0;
     gHostTicksPerFrame = hostClockFreq / kSampleRate;
     memset(gRingBuf, 0, sizeof(gRingBuf));
-    gLastWriteEnd = -1;
+    gRingRead = 0;
+    gRingWrite = 0;
+    gRingCount = 0;
+    gOutputActive = 0;
     return noErr;
 }
 
@@ -563,7 +568,10 @@ static OSStatus CM_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID in
         gAnchorSampleTime = 0.0;
         os_unfair_lock_lock(&gRingLock);
         memset(gRingBuf, 0, sizeof(gRingBuf));
-        gLastWriteEnd = -1;
+        gRingRead = 0;
+        gRingWrite = 0;
+        gRingCount = 0;
+        gOutputActive = 0;
         os_unfair_lock_unlock(&gRingLock);
     }
     gIOClientCount++;
@@ -578,7 +586,10 @@ static OSStatus CM_StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inD
     if (gIOClientCount == 0) {
         os_unfair_lock_lock(&gRingLock);
         memset(gRingBuf, 0, sizeof(gRingBuf));
-        gLastWriteEnd = -1;
+        gRingRead = 0;
+        gRingWrite = 0;
+        gRingCount = 0;
+        gOutputActive = 0;
         os_unfair_lock_unlock(&gRingLock);
     }
     pthread_mutex_unlock(&gStateMutex);
@@ -623,40 +634,49 @@ static OSStatus CM_DoIOOperation(
     void* ioSecondaryBuffer
 ) {
     (void)inDriver; (void)inDeviceObjectID; (void)inStreamObjectID;
-    (void)inClientID; (void)ioSecondaryBuffer;
+    (void)inClientID; (void)inIOCycleInfo; (void)ioSecondaryBuffer;
     if (!ioMainBuffer || inIOBufferFrameSize == 0) return noErr;
 
     float* samples = (float*)ioMainBuffer;
 
     if (inOperationID == kAudioServerPlugInIOOperationWriteMix) {
-        int64_t t0 = (int64_t)llround(inIOCycleInfo->mOutputTime.mSampleTime);
         os_unfair_lock_lock(&gRingLock);
+        // Keep loopback latency minimal (~1-2 IO buffers) even if no reader was attached before
+        UInt32 maxKeep = inIOBufferFrameSize * 2;
+        if (maxKeep > kRingFrames - inIOBufferFrameSize) {
+            maxKeep = kRingFrames - inIOBufferFrameSize;
+        }
+        if (gRingCount > maxKeep) {
+            UInt32 drop = gRingCount - maxKeep;
+            gRingRead = (gRingRead + drop) & kRingMask;
+            gRingCount -= drop;
+        }
         for (UInt32 f = 0; f < inIOBufferFrameSize; ++f) {
-            UInt32 idx = (UInt32)((t0 + (int64_t)f) & kRingMask) * kNumChannels;
+            UInt32 idx = gRingWrite * kNumChannels;
             gRingBuf[idx]     = samples[f * kNumChannels];
             gRingBuf[idx + 1] = samples[f * kNumChannels + 1];
+            gRingWrite = (gRingWrite + 1) & kRingMask;
         }
-        gLastWriteEnd = t0 + (int64_t)inIOBufferFrameSize;
+        gRingCount += inIOBufferFrameSize;
+        if (gRingCount > kRingFrames) {
+            UInt32 overflow = gRingCount - kRingFrames;
+            gRingRead = (gRingRead + overflow) & kRingMask;
+            gRingCount = kRingFrames;
+        }
         gOutputActive = 1;
         os_unfair_lock_unlock(&gRingLock);
     } else if (inOperationID == kAudioServerPlugInIOOperationReadInput) {
-        int64_t t0 = (int64_t)llround(inIOCycleInfo->mInputTime.mSampleTime);
         os_unfair_lock_lock(&gRingLock);
-        // Only read live audio if a writer has written within the last ~200 ms; otherwise silence!
-        if (gOutputActive && gLastWriteEnd >= 0 && (t0 - gLastWriteEnd) < (int64_t)(kRingFrames / 2)) {
-            for (UInt32 f = 0; f < inIOBufferFrameSize; ++f) {
-                int64_t pos = t0 + (int64_t)f;
-                if (pos < gLastWriteEnd && (gLastWriteEnd - pos) < kRingFrames) {
-                    UInt32 idx = (UInt32)(pos & kRingMask) * kNumChannels;
-                    samples[f * kNumChannels]     = gRingBuf[idx];
-                    samples[f * kNumChannels + 1] = gRingBuf[idx + 1];
-                } else {
-                    samples[f * kNumChannels]     = 0.0f;
-                    samples[f * kNumChannels + 1] = 0.0f;
-                }
-            }
-        } else {
-            memset(samples, 0, inIOBufferFrameSize * kNumChannels * sizeof(float));
+        UInt32 take = (gRingCount < inIOBufferFrameSize) ? gRingCount : inIOBufferFrameSize;
+        for (UInt32 f = 0; f < take; ++f) {
+            UInt32 idx = gRingRead * kNumChannels;
+            samples[f * kNumChannels]     = gRingBuf[idx];
+            samples[f * kNumChannels + 1] = gRingBuf[idx + 1];
+            gRingRead = (gRingRead + 1) & kRingMask;
+        }
+        gRingCount -= take;
+        if (take < inIOBufferFrameSize) {
+            memset(samples + take * kNumChannels, 0, (inIOBufferFrameSize - take) * kNumChannels * sizeof(float));
         }
         os_unfair_lock_unlock(&gRingLock);
     }

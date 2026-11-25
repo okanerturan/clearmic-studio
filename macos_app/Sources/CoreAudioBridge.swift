@@ -196,9 +196,17 @@ final class CoreAudioBridge: ObservableObject {
             guard err == nil, let ch = outBuf.floatChannelData?[0] else { return }
             let n = Int(outBuf.frameLength)
             if n > 0 {
-                // Compute input RMS for live meter
+                // Sanitize non-finite samples (e.g. Continuity Camera iPhone mic connect glitches)
+                // and compute input RMS for live meter
                 var sumSq: Float = 0
-                for i in 0..<n { let v = ch[i]; sumSq += v * v }
+                for i in 0..<n {
+                    var v = ch[i]
+                    if !v.isFinite {
+                        v = 0
+                        ch[i] = 0
+                    }
+                    sumSq += v * v
+                }
                 self.latestInRMS = sqrtf(sumSq / Float(n))
 
                 // If recording a 5s voice print, stash raw 48k audio
@@ -501,9 +509,16 @@ final class CoreAudioBridge: ObservableObject {
             let okRxP = outChunk.withUnsafeMutableBytes { recvAll(fd, $0.baseAddress!, byteLen) }
             if !okRxP { break }
 
-            // Update output RMS meter + optional sound-check capture
+            // Sanitize & update output RMS meter + optional sound-check capture
             var sumSq: Float = 0
-            for i in 0..<chunkSamples { let v = outChunk[i]; sumSq += v * v }
+            for i in 0..<chunkSamples {
+                var v = outChunk[i]
+                if !v.isFinite {
+                    v = 0
+                    outChunk[i] = 0
+                }
+                sumSq += v * v
+            }
             latestOutRMS = sqrtf(sumSq / Float(chunkSamples))
 
             recLock.withLock {

@@ -279,6 +279,8 @@ class LiveBroadcastProcessor:
     def process_chunk(self, x_in: np.ndarray) -> tuple[np.ndarray, dict]:
         """Processes one 48 kHz mono chunk (e.g. 960 samples = 20 ms) and returns same-length output."""
         n_req = len(x_in)
+        if not np.all(np.isfinite(x_in)):
+            x_in = np.nan_to_num(x_in, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
         in_rms = float(np.sqrt(np.mean(x_in * x_in) + 1e-12))
 
         with self.lock:
@@ -351,12 +353,20 @@ class LiveBroadcastProcessor:
                 y_raw = np.zeros(n_req, dtype=np.float32)
 
             # Gentle causal broadcast voice leveler + soft-knee limiter (-1 dBFS ceiling)
-            y_rms = float(np.sqrt(np.mean(y_raw * y_raw) + 1e-12))
-            if y_rms > 0.008:
-                self.comp_env = 0.90 * self.comp_env + 0.10 * y_rms
-            makeup = float(np.clip(0.14 / max(self.comp_env, 0.03), 0.7, 2.2)) * self.output_gain
-            y_out = np.tanh((y_raw * makeup) / 0.89) * 0.89
-            y_out = y_out.astype(np.float32)
+            if not np.all(np.isfinite(y_raw)):
+                # Self-heal immediately if any numerical glitch ever enters an IIR/RNN state
+                self._reset_streams()
+                y_out = np.zeros(n_req, dtype=np.float32)
+            else:
+                y_rms = float(np.sqrt(np.mean(y_raw * y_raw) + 1e-12))
+                if y_rms > 0.008 and np.isfinite(y_rms):
+                    self.comp_env = 0.90 * self.comp_env + 0.10 * y_rms
+                makeup = float(np.clip(0.14 / max(self.comp_env, 0.03), 0.7, 2.2)) * self.output_gain
+                y_out = np.tanh((y_raw * makeup) / 0.89) * 0.89
+                y_out = y_out.astype(np.float32)
+                if not np.all(np.isfinite(y_out)):
+                    self._reset_streams()
+                    y_out = np.zeros(n_req, dtype=np.float32)
 
             compute_ms = (time.perf_counter() - t0) * 1000.0
             algo_ms = PRESETS[self.preset_id]["algo_ms"]
@@ -462,6 +472,9 @@ def main() -> None:
             except OSError:
                 break
             conn.settimeout(0.25)
+            # Always start each live session with clean streaming state
+            with proc.lock:
+                proc._reset_streams()
             emit({"event": "audio_connected"})
             try:
                 while _drain_cmds():
