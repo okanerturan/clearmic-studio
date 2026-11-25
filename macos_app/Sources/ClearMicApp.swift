@@ -7,10 +7,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let installer = DriverInstaller()
     let daemon = DaemonClient()
     let bridge = CoreAudioBridge()
+    let dropController = AudioDropController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let rootView = ContentView(devices: devices, installer: installer, daemon: daemon, bridge: bridge)
+        let rootView = ContentView(
+            devices: devices,
+            installer: installer,
+            daemon: daemon,
+            bridge: bridge,
+            dropController: dropController
+        )
         let hosting = NSHostingView(rootView: rootView)
+        let dropHost = AudioDropHostView(childView: hosting, controller: dropController)
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 760, height: 660),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -21,7 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.titlebarAppearsTransparent = true
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = Palette.groundNS
-        window.contentView = hosting
+        window.contentView = dropHost
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

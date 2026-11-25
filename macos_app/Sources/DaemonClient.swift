@@ -5,6 +5,7 @@ final class DaemonClient: ObservableObject {
     @Published var statusMessage: String = "Starting Apple Silicon engine..."
     @Published var socketPath: String? = nil
     @Published var hasEnrollment: Bool = false
+    @Published var isEnrolling: Bool = false
     @Published var enrollLabel: String = "No voice print yet"
     @Published var mlxMemMB: Double = 0.0
     @Published var computeMs: Double = 0.0
@@ -168,13 +169,21 @@ final class DaemonClient: ObservableObject {
         sendJSON(["cmd": "reset"])
     }
 
-    func enroll(wavPath: String) {
+    func enroll(wavPath: String, label: String? = nil) {
+        DispatchQueue.main.async {
+            self.isEnrolling = true
+            self.lastError = nil
+        }
         let savePath = "\(appSupportDir)/voice_print_16k.wav"
-        sendJSON([
+        var payload: [String: Any] = [
             "cmd": "enroll",
             "wav_path": wavPath,
             "save_path": savePath,
-        ])
+        ]
+        if let label = label, !label.isEmpty {
+            payload["label"] = label
+        }
+        sendJSON(payload)
     }
 
     private func sendJSON(_ dict: [String: Any]) {
@@ -210,10 +219,18 @@ final class DaemonClient: ObservableObject {
                 self.algoMs = (obj["algo_ms"] as? Double) ?? self.algoMs
                 self.e2eMs = (obj["e2e_ms"] as? Double) ?? self.e2eMs
             case "enrolled":
+                self.isEnrolling = false
                 self.hasEnrollment = true
                 let dur = (obj["duration_s"] as? Double) ?? 5.0
-                self.enrollLabel = String(format: "Your voice (%.1fs)", dur)
+                if let label = obj["label"] as? String, !label.isEmpty {
+                    self.enrollLabel = String(format: "%@ (%.1fs)", label, dur)
+                } else {
+                    self.enrollLabel = String(format: "Your voice (%.1fs)", dur)
+                }
                 self.statusMessage = "Voice Print Updated"
+            case "enroll_error":
+                self.isEnrolling = false
+                self.lastError = (obj["error"] as? String) ?? "Failed to enroll voice print."
             default:
                 break
             }

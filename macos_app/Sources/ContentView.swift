@@ -47,12 +47,27 @@ let kPresets: [PresetOption] = [
 struct ContentView: View {
     @ObservedObject var devices: AudioDeviceManager
     @ObservedObject var installer: DriverInstaller
+    @ObservedObject var dropController: AudioDropController
     // Neither of these is observed here. While live the bridge publishes meters 30 times a
     // second and the daemon publishes stats 20 times a second; the views that draw those
     // values observe them, and this view mirrors only the few that change with a click or
     // an engine event, so the pickers, sliders and tiles are not rebuilt on every meter tick.
     let daemon: DaemonClient
     let bridge: CoreAudioBridge
+
+    init(
+        devices: AudioDeviceManager,
+        installer: DriverInstaller,
+        daemon: DaemonClient,
+        bridge: CoreAudioBridge,
+        dropController: AudioDropController
+    ) {
+        self.devices = devices
+        self.installer = installer
+        self.daemon = daemon
+        self.bridge = bridge
+        self.dropController = dropController
+    }
 
     @State private var selectedInputID: AudioDeviceID = 0
     @State private var selectedOutputID: AudioDeviceID = 0
@@ -90,9 +105,10 @@ struct ContentView: View {
             VoicePrintSection(
                 daemon: daemon,
                 bridge: bridge,
+                installer: installer,
                 hasInput: selectedInputID != 0,
                 onRecord: startEnroll,
-                onDropFile: handleDroppedVoiceFile
+                onChooseFile: chooseVoiceFile
             )
         }
         .padding(.horizontal, Space.s5)
@@ -103,6 +119,11 @@ struct ContentView: View {
         .foregroundStyle(Palette.ink)
         .tint(Palette.accent)
         .preferredColorScheme(.dark)
+        .overlay {
+            if dropController.isDraggingAudio {
+                AudioDropOverlay()
+            }
+        }
         .sheet(isPresented: $showSetupSheet) {
             SetupSheet(
                 devices: devices,
@@ -112,6 +133,7 @@ struct ContentView: View {
                 hasInput: selectedInputID != 0,
                 onRecordVoicePrint: startEnroll,
                 onDropVoiceFile: handleDroppedVoiceFile,
+                onChooseVoiceFile: chooseVoiceFile,
                 onFinish: { showSetupSheet = false }
             )
         }
@@ -119,6 +141,17 @@ struct ContentView: View {
             installer.refreshMicStatus()
             selectDefaultDevices()
             daemon.start()
+            dropController.onDropStarted = {
+                installer.isImportingVoice = true
+                installer.installError = nil
+            }
+            dropController.onAudioFile = { url, label in
+                handleDroppedVoiceFile(url, label: label)
+            }
+            dropController.onDropError = { msg in
+                installer.isImportingVoice = false
+                installer.installError = msg
+            }
             if !checkedFirstLaunchSetup {
                 checkedFirstLaunchSetup = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
@@ -475,15 +508,22 @@ struct ContentView: View {
     private func startEnroll() {
         bridge.recordEnrollment(inputDeviceID: selectedInputID, seconds: 5.0) { wavPath in
             if let p = wavPath {
-                daemon.enroll(wavPath: p)
+                daemon.enroll(wavPath: p, label: "Your voice")
             }
         }
     }
 
-    private func handleDroppedVoiceFile(_ url: URL) {
+    private func chooseVoiceFile() {
+        presentAudioFilePicker { url in
+            let label = url.deletingPathExtension().lastPathComponent
+            handleDroppedVoiceFile(url, label: label)
+        }
+    }
+
+    private func handleDroppedVoiceFile(_ url: URL, label: String) {
         installer.convertDroppedAudioToWav48k(from: url) { wavPath in
             if let p = wavPath {
-                daemon.enroll(wavPath: p)
+                daemon.enroll(wavPath: p, label: label)
             }
         }
     }
@@ -614,11 +654,10 @@ struct ErrorNotice: View {
 struct VoicePrintSection: View {
     @ObservedObject var daemon: DaemonClient
     @ObservedObject var bridge: CoreAudioBridge
+    @ObservedObject var installer: DriverInstaller
     let hasInput: Bool
     let onRecord: () -> Void
-    let onDropFile: (URL) -> Void
-
-    @State private var isDropTargeted = false
+    let onChooseFile: () -> Void
 
     /// The engine names the voice print by its file; the two files it ships with get plain names.
     private var printName: String {
@@ -631,8 +670,6 @@ struct VoicePrintSection: View {
     }
 
     var body: some View {
-        let dropShape = RoundedRectangle(cornerRadius: Radius.tile, style: .continuous)
-
         VStack(alignment: .leading, spacing: Space.s2) {
             SectionLabel("Voice print")
 
@@ -645,9 +682,9 @@ struct VoicePrintSection: View {
                             .accessibilityHidden(true)
                         Text(printName).font(Typo.strong)
                     }
-                    Text(isDropTargeted ? "Drop audio file to enroll your voice." : "Speak alone for 5 seconds, or drop an .m4a / .wav Voice Memo here.")
+                    Text("Speak alone for 5 seconds, or drop a Voice Memo anywhere on this window.")
                         .font(Typo.caption)
-                        .foregroundStyle(isDropTargeted ? Palette.accent : Palette.muted)
+                        .foregroundStyle(Palette.muted)
                 }
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -655,7 +692,17 @@ struct VoicePrintSection: View {
 
                 if bridge.isRecordingEnroll {
                     progress("Recording", value: bridge.enrollProgress)
+                } else if installer.isImportingVoice || daemon.isEnrolling {
+                    HStack(spacing: Space.s2) {
+                        ProgressView().controlSize(.small)
+                        Text(installer.isImportingVoice ? "Importing" : "Enrolling").font(Typo.strong)
+                    }
+                    .frame(height: 32)
                 } else {
+                    Button("Choose file", action: onChooseFile)
+                        .buttonStyle(LinkButtonStyle())
+                        .help("Import a Voice Memo or audio file (.m4a, .wav, .mp3) as your voice print.")
+
                     Button("Record voice print", action: onRecord)
                         .buttonStyle(ActionButtonStyle(.secondary))
                         .disabled(!daemon.isReady || !hasInput)
@@ -674,12 +721,6 @@ struct VoicePrintSection: View {
                         .disabled(!bridge.isRunning)
                         .help("While live, records 5 seconds of the cleaned output and plays it back.")
                 }
-            }
-            .padding(isDropTargeted ? Space.s2 : 0)
-            .background(isDropTargeted ? dropShape.fill(Palette.accent.opacity(0.08)) : dropShape.fill(Color.clear))
-            .overlay(isDropTargeted ? dropShape.strokeBorder(Palette.accent, lineWidth: 1.5) : dropShape.strokeBorder(Color.clear, lineWidth: 1))
-            .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
-                handleAudioDrop(providers: providers, onFile: onDropFile)
             }
         }
     }

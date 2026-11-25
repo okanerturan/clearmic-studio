@@ -8,6 +8,7 @@ import Foundation
 /// opens System Settings panes directly.
 final class DriverInstaller: ObservableObject {
     @Published var isInstalling: Bool = false
+    @Published var isImportingVoice: Bool = false
     @Published var installError: String? = nil
     @Published var micAuthStatus: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .audio)
 
@@ -72,23 +73,45 @@ final class DriverInstaller: ObservableObject {
     /// Converts any macOS-readable audio file (.m4a Voice Memo, .wav, .mp3, .aiff, .caf)
     /// into a clean 48 kHz mono float32 WAV for Voice Print enrollment.
     func convertDroppedAudioToWav48k(from url: URL, completion: @escaping (String?) -> Void) {
+        DispatchQueue.main.async {
+            self.isImportingVoice = true
+            self.installError = nil
+        }
         DispatchQueue.global(qos: .userInitiated).async {
-            let outPath = "/tmp/clearmic_dropped_enroll.wav"
+            let resolved = (url as NSURL).filePathURL ?? url
+            let accessed = resolved.startAccessingSecurityScopedResource()
+            defer {
+                if accessed { resolved.stopAccessingSecurityScopedResource() }
+            }
+
+            let outPath = NSTemporaryDirectory() + "clearmic_dropped_\(UUID().uuidString).wav"
             try? FileManager.default.removeItem(atPath: outPath)
 
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/afconvert")
-            proc.arguments = ["-f", "WAVE", "-d", "LEF32@48000", "-c", "1", url.path, outPath]
+            proc.arguments = ["-f", "WAVE", "-d", "LEF32@48000", "-c", "1", resolved.path, outPath]
+            let errPipe = Pipe()
+            proc.standardError = errPipe
+            proc.standardOutput = errPipe
+
             do {
                 try proc.run()
                 proc.waitUntilExit()
+                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                let errMsg = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 let ok = (proc.terminationStatus == 0) && FileManager.default.fileExists(atPath: outPath)
                 DispatchQueue.main.async {
+                    self.isImportingVoice = false
+                    if !ok {
+                        let detail = errMsg.isEmpty ? "exit \(proc.terminationStatus)" : errMsg
+                        self.installError = "Could not decode \(resolved.lastPathComponent): \(detail)"
+                    }
                     completion(ok ? outPath : nil)
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.installError = "Could not decode audio file: \(error.localizedDescription)"
+                    self.isImportingVoice = false
+                    self.installError = "Could not decode \(resolved.lastPathComponent): \(error.localizedDescription)"
                     completion(nil)
                 }
             }

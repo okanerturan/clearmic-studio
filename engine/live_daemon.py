@@ -151,13 +151,31 @@ class LiveBroadcastProcessor:
             return x
         return np.zeros(16000 * 4, dtype=np.float32)
 
-    def enroll_from_wav(self, wav_48k_path: pathlib.Path, save_to: pathlib.Path) -> dict:
-        """Cleans a newly recorded 48 kHz voice sample with Inworld and updates enrollment."""
+    def enroll_from_wav(self, wav_48k_path: pathlib.Path, save_to: pathlib.Path, label: str | None = None) -> dict:
+        """Cleans a newly recorded or dropped 48 kHz voice sample with Inworld and updates enrollment."""
         x, sr = sf.read(str(wav_48k_path), dtype="float32")
         if x.ndim == 2:
             x = x.mean(axis=1)
+        if len(x) < max(int(sr * 0.25), 1600):
+            raise ValueError("Audio clip is too short to build a voice print.")
         if sr != 48000:
             x = soxr.resample(x, sr, 48000).astype(np.float32)
+
+        # For long Voice Memos (>20s), pick the highest-energy 15-second contiguous speech window
+        # so enrollment stays fast (~1.5s) and skips leading silence.
+        max_samples = 48000 * 20
+        win_samples = 48000 * 15
+        if len(x) > max_samples:
+            hop = 48000
+            best_i, best_e = 0, -1.0
+            for i in range(0, len(x) - win_samples + 1, hop):
+                seg = x[i : i + win_samples]
+                e = float(np.mean(seg * seg))
+                if e > best_e:
+                    best_e = e
+                    best_i = i
+            x = x[best_i : best_i + win_samples]
+
         r = float(np.sqrt(np.mean(x * x) + 1e-12))
         if r > 1e-5:
             x = np.clip(x * (0.10 / r), -0.92, 0.92).astype(np.float32)
@@ -169,7 +187,10 @@ class LiveBroadcastProcessor:
             self.enroll_path = save_to
             self.enroll_16k = enr_16
             self._reset_streams()
-        return {"ok": True, "duration_s": round(len(enr_16) / 16000.0, 2), "path": str(save_to)}
+        res = {"ok": True, "duration_s": round(len(enr_16) / 16000.0, 2), "path": str(save_to)}
+        if label:
+            res["label"] = label
+        return res
 
     def _warmup_all(self) -> None:
         dummy48 = np.zeros(480 * 2 * 6, dtype=np.float32)
@@ -412,8 +433,11 @@ def main() -> None:
             elif cmd == "enroll":
                 wav_p = pathlib.Path(msg["wav_path"])
                 save_p = pathlib.Path(msg.get("save_path", str(default_enroll)))
-                res = proc.enroll_from_wav(wav_p, save_p)
-                emit({"event": "enrolled", **res})
+                try:
+                    res = proc.enroll_from_wav(wav_p, save_p, label=msg.get("label"))
+                    emit({"event": "enrolled", **res})
+                except Exception as exc:
+                    emit({"event": "enroll_error", "error": f"Voice enrollment failed: {exc}"})
             elif cmd == "reset":
                 with proc.lock:
                     proc._reset_streams()

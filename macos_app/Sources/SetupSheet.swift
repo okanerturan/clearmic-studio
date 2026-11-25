@@ -1,9 +1,11 @@
+import AppKit
 import AVFoundation
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// Native macOS setup & permissions checklist shown on first run (or via "Setup" in the header).
 /// Follows the exact Palette, Space, Radius, Typo and button pair from Theme.swift.
+/// Wrapped in AudioDropSheetWrapper so Voice Memos.app file promises and Finder audio files
+/// can be dropped anywhere on the sheet.
 struct SetupSheet: View {
     @ObservedObject var devices: AudioDeviceManager
     @ObservedObject var installer: DriverInstaller
@@ -11,10 +13,11 @@ struct SetupSheet: View {
     @ObservedObject var bridge: CoreAudioBridge
     let hasInput: Bool
     let onRecordVoicePrint: () -> Void
-    let onDropVoiceFile: (URL) -> Void
+    let onDropVoiceFile: (URL, String) -> Void
+    let onChooseVoiceFile: () -> Void
     let onFinish: () -> Void
 
-    @State private var isDropTargeted = false
+    @StateObject private var sheetDrop = AudioDropController()
 
     private var micGranted: Bool { installer.micAuthStatus == .authorized }
     private var micDenied: Bool { installer.micAuthStatus == .denied || installer.micAuthStatus == .restricted }
@@ -22,6 +25,25 @@ struct SetupSheet: View {
     private var coreReady: Bool { micGranted && driverReady }
 
     var body: some View {
+        AudioDropSheetWrapper(controller: sheetDrop) {
+            sheetContent
+        }
+        .onAppear {
+            sheetDrop.onDropStarted = {
+                installer.isImportingVoice = true
+                installer.installError = nil
+            }
+            sheetDrop.onAudioFile = { url, label in
+                onDropVoiceFile(url, label)
+            }
+            sheetDrop.onDropError = { msg in
+                installer.isImportingVoice = false
+                installer.installError = msg
+            }
+        }
+    }
+
+    private var sheetContent: some View {
         VStack(alignment: .leading, spacing: Space.s4) {
             // Header
             VStack(alignment: .leading, spacing: Space.s1) {
@@ -34,7 +56,7 @@ struct SetupSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if let err = installer.installError {
+            if let err = installer.installError ?? daemon.lastError {
                 ErrorNotice(message: err)
             }
 
@@ -104,15 +126,14 @@ struct SetupSheet: View {
                 }
             }
 
-            // Step 3: Voice Print (Record OR Drag & Drop a Voice Memo)
+            // Step 3: Voice Print (Record, Choose File, or Drag & Drop Voice Memo)
             stepRow(
                 number: 3,
                 title: "Target voice print",
                 subtitle: daemon.hasEnrollment
-                    ? "\(daemon.enrollLabel) is loaded. Drop a Voice Memo (.m4a/.wav) here or record 5 seconds to replace it."
-                    : "Record 5 seconds of your voice alone, or drop an .m4a / .wav file here.",
-                done: daemon.hasEnrollment,
-                highlightedDrop: isDropTargeted
+                    ? "\(daemon.enrollLabel) is loaded. Drop a Voice Memo anywhere here or record 5 seconds to replace it."
+                    : "Record 5 seconds of your voice alone, choose a file, or drop a Voice Memo here.",
+                done: daemon.hasEnrollment
             ) {
                 if bridge.isRecordingEnroll {
                     HStack(spacing: Space.s2) {
@@ -120,16 +141,23 @@ struct SetupSheet: View {
                         Text("Recording").font(Typo.strong)
                     }
                     .frame(height: 32)
-                } else {
-                    Button(daemon.hasEnrollment ? "Re-record 5s" : "Record 5s") {
-                        onRecordVoicePrint()
+                } else if installer.isImportingVoice || daemon.isEnrolling {
+                    HStack(spacing: Space.s2) {
+                        ProgressView().controlSize(.small)
+                        Text(installer.isImportingVoice ? "Importing" : "Enrolling").font(Typo.strong)
                     }
-                    .buttonStyle(ActionButtonStyle(.secondary))
-                    .disabled(!daemon.isReady || !hasInput || !micGranted)
+                    .frame(height: 32)
+                } else {
+                    HStack(spacing: Space.s2) {
+                        Button("Choose file", action: onChooseVoiceFile)
+                            .buttonStyle(LinkButtonStyle())
+                        Button(daemon.hasEnrollment ? "Re-record 5s" : "Record 5s") {
+                            onRecordVoicePrint()
+                        }
+                        .buttonStyle(ActionButtonStyle(.secondary))
+                        .disabled(!daemon.isReady || !hasInput || !micGranted)
+                    }
                 }
-            }
-            .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
-                handleAudioDrop(providers: providers, onFile: onDropVoiceFile)
             }
 
             Rectangle()
@@ -153,6 +181,11 @@ struct SetupSheet: View {
         .foregroundStyle(Palette.ink)
         .tint(Palette.accent)
         .preferredColorScheme(.dark)
+        .overlay {
+            if sheetDrop.isDraggingAudio {
+                AudioDropOverlay()
+            }
+        }
         .onAppear {
             installer.refreshMicStatus()
             devices.refresh()
@@ -168,7 +201,6 @@ struct SetupSheet: View {
         title: String,
         subtitle: String,
         done: Bool,
-        highlightedDrop: Bool = false,
         @ViewBuilder action: () -> Action
     ) -> some View {
         let shape = RoundedRectangle(cornerRadius: Radius.tile, style: .continuous)
@@ -201,31 +233,7 @@ struct SetupSheet: View {
             action()
         }
         .padding(Space.s3)
-        .background(shape.fill(highlightedDrop ? Palette.accent.opacity(0.10) : Palette.surface))
-        .overlay(shape.strokeBorder(highlightedDrop ? Palette.accent : Palette.line, lineWidth: highlightedDrop ? 1.5 : 1))
+        .background(shape.fill(Palette.surface))
+        .overlay(shape.strokeBorder(Palette.line, lineWidth: 1))
     }
-}
-
-func handleAudioDrop(providers: [NSItemProvider], onFile: @escaping (URL) -> Void) -> Bool {
-    guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }) else {
-        return false
-    }
-    provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-        let url: URL?
-        if let data = item as? Data {
-            url = URL(dataRepresentation: data, relativeTo: nil)
-        } else if let direct = item as? URL {
-            url = direct
-        } else {
-            url = nil
-        }
-        guard let fileURL = url else { return }
-        let ext = fileURL.pathExtension.lowercased()
-        let allowed: Set<String> = ["m4a", "wav", "mp3", "flac", "aiff", "aif", "caf", "aac"]
-        guard allowed.contains(ext) else { return }
-        DispatchQueue.main.async {
-            onFile(fileURL)
-        }
-    }
-    return true
 }
